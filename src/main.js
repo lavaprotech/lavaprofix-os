@@ -195,6 +195,10 @@ const STATE = {
   selectedServiceIds: new Set(),
   selectedParts: [],
 
+  manualServices: [], // [{ id, name, labor_cents, warranty_days }]
+  manualParts: [],    // [{ id, part_name, cost_real_cents, margin_percent, needs_supplier_pickup }]
+
+
   client_name: "",
   client_phone: "",
   client_address: "",
@@ -262,6 +266,19 @@ app.innerHTML = `
             <button id="clearSel" class="btn">Limpar</button>
           </div>
         </div>
+        <div class="divider"></div>
+<div class="label">Serviço manual</div>
+<div class="hint">Use quando o serviço não estiver no catálogo.</div>
+
+<div class="row">
+  <input id="manualServiceName" class="input" placeholder="Nome do serviço (ex: troca de mangueira)" />
+  <input id="manualServiceValue" class="input" placeholder="Valor mão de obra (R$)" style="max-width:220px;" />
+  <input id="manualServiceWarranty" class="input" placeholder="Garantia (dias)" style="max-width:160px;" />
+  <button id="addManualService" class="btn btnOrange">Adicionar</button>
+</div>
+
+<div id="manualServicesList" class="list"></div>
+
         <div id="servicesWrap" class="servicesWrap">
           <div class="hint">Escolha um tipo (acima) para exibir serviços.</div>
         </div>
@@ -283,6 +300,21 @@ app.innerHTML = `
 
           <button id="addPart" class="btn btnOrange">Adicionar</button>
         </div>
+        <div class="divider"></div>
+<div class="label">Peça manual</div>
+<div class="hint">Use quando a peça não estiver cadastrada no Supabase.</div>
+
+<div class="row">
+  <input id="manualPartName" class="input" placeholder="Nome da peça (ex: atuador freio)" />
+  <input id="manualPartCost" class="input" placeholder="Custo (R$)" style="max-width:180px;" />
+  <select id="manualPartMargin" class="input" style="max-width:160px;">
+    <option value="30">Margem 30%</option>
+    <option value="40" selected>Margem 40%</option>
+  </select>
+  <button id="addManualPart" class="btn btnOrange">Adicionar</button>
+</div>
+
+<div id="manualPartsList" class="list"></div>
 
         <div id="partsList" class="list"></div>
 
@@ -791,6 +823,147 @@ el("#autoSupplierLog").addEventListener("click", () => {
 });
 
 // =========================
+// MANUAL SERVICES / PARTS
+// =========================
+function parseBRLToCents(val) {
+  const s = String(val || "").replace(/\./g, "").replace(",", ".").replace(/[^\d.]/g, "");
+  const n = Number(s);
+  if (!isFinite(n) || n <= 0) return 0;
+  return Math.round(n * 100);
+}
+
+function uid(prefix) {
+  return `${prefix}_${Math.random().toString(16).slice(2)}_${Date.now()}`;
+}
+
+// ---- Manual Service
+function renderManualServices() {
+  const box = el("#manualServicesList");
+  if (!box) return;
+
+  if (!STATE.manualServices.length) {
+    box.innerHTML = `<div class="hint">Nenhum serviço manual.</div>`;
+    return;
+  }
+
+  box.innerHTML = STATE.manualServices
+    .map((s, i) => `
+      <div class="pill">
+        <div>
+          <div style="font-weight:1000;">${s.name}</div>
+          <div class="hint">Mão de obra: <b>${brl(s.labor_cents)}</b> • Garantia: ${s.warranty_days || 0} dias</div>
+        </div>
+        <button class="btn" data-act="rmManualService" data-i="${i}">Remover</button>
+      </div>
+    `)
+    .join("");
+
+  box.querySelectorAll("button[data-act=rmManualService]").forEach((b) => {
+    b.addEventListener("click", (e) => {
+      const i = Number(e.target.getAttribute("data-i"));
+      STATE.manualServices.splice(i, 1);
+      renderManualServices();
+      renderSummaries();
+    });
+  });
+}
+
+el("#addManualService")?.addEventListener("click", () => {
+  const name = safeText(el("#manualServiceName")?.value);
+  const cents = parseBRLToCents(el("#manualServiceValue")?.value);
+  const wd = Number(el("#manualServiceWarranty")?.value || 0);
+
+  if (!name) return alert("Digite o nome do serviço manual.");
+  if (!cents) return alert("Digite um valor válido (R$).");
+
+  STATE.manualServices.push({
+    id: uid("ms"),
+    name,
+    labor_cents: cents,
+    warranty_days: Math.max(0, wd || 0),
+  });
+
+  el("#manualServiceName").value = "";
+  el("#manualServiceValue").value = "";
+  el("#manualServiceWarranty").value = "";
+
+  renderManualServices();
+  renderSummaries();
+});
+
+// ---- Manual Part
+function renderManualParts() {
+  const box = el("#manualPartsList");
+  if (!box) return;
+
+  if (!STATE.manualParts.length) {
+    box.innerHTML = `<div class="hint">Nenhuma peça manual.</div>`;
+    return;
+  }
+
+  box.innerHTML = STATE.manualParts
+    .map((p, i) => `
+      <div class="pill">
+        <div>
+          <div style="font-weight:1000;">${p.part_name}</div>
+          <div class="hint">Venda: <b>${brl(calcPartSaleCents(p))}</b> ${p.needs_supplier_pickup ? " • Fornecedor" : ""}</div>
+          <div class="hint" style="opacity:.85;">(interno) custo: ${brl(p.cost_real_cents)} • margem: ${p.margin_percent}%</div>
+        </div>
+        <div class="row" style="gap:6px;">
+          <button class="btn" data-act="toggleManualSupplier" data-i="${i}">
+            ${p.needs_supplier_pickup ? "Fornecedor: SIM" : "Fornecedor: NÃO"}
+          </button>
+          <button class="btn" data-act="rmManualPart" data-i="${i}">Remover</button>
+        </div>
+      </div>
+    `)
+    .join("");
+
+  box.querySelectorAll("button[data-act]").forEach((b) => {
+    b.addEventListener("click", (e) => {
+      const act = e.target.getAttribute("data-act");
+      const i = Number(e.target.getAttribute("data-i"));
+
+      if (act === "rmManualPart") {
+        STATE.manualParts.splice(i, 1);
+        renderManualParts();
+        renderSummaries();
+      }
+
+      if (act === "toggleManualSupplier") {
+        STATE.manualParts[i].needs_supplier_pickup = !STATE.manualParts[i].needs_supplier_pickup;
+        renderManualParts();
+        renderSummaries();
+      }
+    });
+  });
+}
+
+el("#addManualPart")?.addEventListener("click", () => {
+  const name = safeText(el("#manualPartName")?.value);
+  const cost = parseBRLToCents(el("#manualPartCost")?.value);
+  const margin = Number(el("#manualPartMargin")?.value || 40);
+
+  if (!name) return alert("Digite o nome da peça manual.");
+  if (!cost) return alert("Digite um custo válido (R$).");
+
+  STATE.manualParts.push({
+    id: uid("mp"),
+    part_id: null,
+    part_name: name,
+    cost_real_cents: cost,
+    margin_percent: margin,
+    needs_supplier_pickup: false,
+  });
+
+  el("#manualPartName").value = "";
+  el("#manualPartCost").value = "";
+
+  renderManualParts();
+  renderSummaries();
+});
+
+// =========================
 // OS INPUTS
 // =========================
 el("#clientName").addEventListener("input", (e) => (STATE.client_name = e.target.value || ""));
@@ -820,7 +993,9 @@ function calcLogisticsCents() {
   if (STATE.supplier_logistics_override_cents !== null)
     return Number(STATE.supplier_logistics_override_cents || 0);
 
-  const needs = (STATE.selectedParts || []).some((p) => p.needs_supplier_pickup === true);
+  const needs = [...(STATE.selectedParts || []), ...(STATE.manualParts || [])]
+  .some((p) => p.needs_supplier_pickup === true);
+
   if (!needs) return 0;
 
   return Math.round(Number(STATE.config.CUSTO_DESLOCAMENTO_EXTRA_FORNECEDOR_PADRAO || 40) * 100);
@@ -828,26 +1003,35 @@ function calcLogisticsCents() {
 
 function computeTotals() {
   const selectedServices = getSelectedServices();
+  const manualServices = STATE.manualServices || [];
+
   const diagValue = getDiagnosisValueCents();
 
   const diagSelected = selectedServices.some((s) => isDiagnosticService(s));
   const nonDiagServices = selectedServices.filter((s) => !isDiagnosticService(s));
+  const allNonDiag = [...nonDiagServices, ...manualServices];
+
 
   const onlyDiagSelected = diagSelected && nonDiagServices.length === 0;
 
   const labor = onlyDiagSelected
     ? diagValue
-    : nonDiagServices.reduce((sum, s) => sum + Number(s.labor_base_cents || 0), 0);
+    : allNonDiag.reduce((sum, s) => sum + Number(s.labor_base_cents || s.labor_cents || 0), 0);
 
-  const partsSale = (STATE.selectedParts || []).reduce((sum, p) => sum + calcPartSaleCents(p), 0);
-  const partsCost = (STATE.selectedParts || []).reduce((sum, p) => sum + Number(p.cost_real_cents || 0), 0);
+
+  const allParts = [...(STATE.selectedParts || []), ...(STATE.manualParts || [])];
+
+  const partsSale = allParts.reduce((sum, p) => sum + calcPartSaleCents(p), 0);
+  const partsCost = allParts.reduce((sum, p) => sum + Number(p.cost_real_cents || 0), 0);
+
 
   const logistics = calcLogisticsCents();
 
   const isMachineType =
     STATE.equipment === EQUIPMENT_TYPE.TOP_LOAD || STATE.equipment === EQUIPMENT_TYPE.LAVA_E_SECA;
 
-  const diagnosisIncludedFree = isMachineType && nonDiagServices.length >= 1;
+  const diagnosisIncludedFree = isMachineType && allNonDiag.length >= 1;
+
 
   const card = Math.max(0, labor + partsSale + logistics);
 
@@ -860,7 +1044,12 @@ function computeTotals() {
   const fixedCost = Math.round(Number(STATE.config.CUSTO_FIXO_ATENDIMENTO_PADRAO || 65.3) * 100);
   const lucroReal = netCard - partsCost - logistics - fixedCost;
 
-  const warrantyDays = Math.max(...selectedServices.map((s) => Number(s.warranty_days || 0)), 0);
+  const warrantyDays = Math.max(
+  ...selectedServices.map((s) => Number(s.warranty_days || 0)),
+  ...manualServices.map((s) => Number(s.warranty_days || 0)),
+  0
+);
+
 
   return {
     selectedServices,
@@ -1135,6 +1324,8 @@ el("#newOS").addEventListener("click", () => {
 
   STATE.selectedServiceIds = new Set();
   STATE.selectedParts = [];
+  STATE.manualServices = [];
+  STATE.manualParts = [];
   COMBO_STATE = { discountPct: 0, discountedCard: null };
 
   STATE.client_name = "";
@@ -1155,6 +1346,8 @@ el("#newOS").addEventListener("click", () => {
   renderServiceList();
   renderParts();
   renderSummaries();
+  renderManualServices();
+  renderManualParts();
 });
 
 // =========================
@@ -1516,6 +1709,8 @@ async function reloadAll() {
   populatePartsSelect();
   renderServiceList();
   renderParts();
+  renderManualServices();
+  renderManualParts();
   renderSummaries();
   attachPdfButton();
 }
