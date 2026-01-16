@@ -188,6 +188,9 @@ const STATE = {
   search: "",
   services: [],
   partsCatalog: [],
+  manualServices: [], // { id, name, labor_base_cents, warranty_days }
+  manualParts: [],    // { id, part_name, cost_real_cents, margin_percent, needs_supplier_pickup }
+
 
   selectedServiceIds: new Set(),
   selectedParts: [],
@@ -294,6 +297,7 @@ app.innerHTML = `
         </div>
       </div>
     </section>
+
 
     <section class="card">
       <div class="row between">
@@ -927,13 +931,28 @@ el("#applyCombo").addEventListener("click", () => {
 function buildClientMessage(t, useCombo = false) {
   const clientName = safeText(STATE.client_name) || "Cliente";
   const eqLabel = equipmentLabel(STATE.equipment);
+  
+  // ---- Serviços (catálogo + manual)
 
-  const servicesTxt = t.selectedServices.map((s) => `• ${s.name}`).join("\n") || "• (nenhum)";
+  const servicesAll = [
+  ...(t.selectedServices || []).map((s) => s.name),
+  ...(t.manualServices || []).map((s) => s.name),
+];
 
-  const hasParts = (STATE.selectedParts || []).length > 0;
-  const partsTxt = hasParts
-    ? `\n\nPeças previstas:\n${STATE.selectedParts.map((p) => `• ${p.part_name}`).join("\n")}`
+  const servicesTxt = servicesAll.length
+    ? servicesAll.map((n) => `• ${n}`).join("\n")
+    : "• (nenhum)";
+
+
+  const partsAll = [
+  ...(STATE.selectedParts || []),
+  ...(STATE.manualParts || []),
+];
+
+  const partsTxt = partsAll.length
+    ? `\n\nPeças previstas:\n${partsAll.map((p) => `• ${p.part_name}`).join("\n")}`
     : "";
+
 
   const diagTxt = t.diagnosisIncludedFree ? `\n✅ Diagnóstico técnico incluso (orçamento aprovado).` : "";
 
@@ -1500,6 +1519,126 @@ async function reloadAll() {
   renderSummaries();
   attachPdfButton();
 }
+
+// =========================
+// ORÇAMENTO MANUAL (SERVIÇO + PEÇA)
+// =========================
+function toCentsFromBRL(input) {
+  const n = Number(String(input || "").replace(",", ".").replace(/[^0-9.]/g, ""));
+  if (!Number.isFinite(n)) return 0;
+  return Math.round(n * 100);
+}
+
+function uid(prefix = "m") {
+  return `${prefix}_${Math.random().toString(16).slice(2)}_${Date.now()}`;
+}
+
+// ---- Serviço manual
+function renderManualServices() {
+  const box = el("#manualServicesList");
+  if (!box) return;
+
+  if (!STATE.manualServices.length) {
+    box.innerHTML = `<div class="hint">Nenhum serviço manual adicionado.</div>`;
+    return;
+  }
+
+  box.innerHTML = STATE.manualServices.map((s, idx) => `
+    <div class="pill">
+      <div>
+        <div style="font-weight:1000;">${s.name}</div>
+        <div class="hint">Valor: <b>${brl(s.labor_base_cents)}</b> • ${s.warranty_days > 0 ? `Garantia ${s.warranty_days} dias` : "Sem garantia"}</div>
+      </div>
+      <button class="btn" data-act="rmManualSvc" data-i="${idx}">Remover</button>
+    </div>
+  `).join("");
+
+  box.querySelectorAll("button[data-act='rmManualSvc']").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      const i = Number(e.target.getAttribute("data-i"));
+      STATE.manualServices.splice(i, 1);
+      renderManualServices();
+      renderSummaries();
+    });
+  });
+}
+
+el("#addManualService")?.addEventListener("click", () => {
+  const name = safeText(el("#manualSvcName")?.value);
+  const valueCents = toCentsFromBRL(el("#manualSvcValue")?.value);
+  const warrantyDays = Number(el("#manualSvcWarranty")?.value || 90);
+
+  if (!name) return alert("Digite o nome do serviço manual.");
+  if (!valueCents || valueCents <= 0) return alert("Digite um valor válido para o serviço manual.");
+
+  STATE.manualServices.push({
+    id: uid("svc"),
+    name,
+    labor_base_cents: valueCents,
+    warranty_days: warrantyDays,
+  });
+
+  el("#manualSvcName").value = "";
+  el("#manualSvcValue").value = "";
+
+  renderManualServices();
+  renderSummaries();
+});
+
+// ---- Peça/material manual
+function renderManualParts() {
+  const box = el("#manualPartsList");
+  if (!box) return;
+
+  if (!STATE.manualParts.length) {
+    box.innerHTML = `<div class="hint">Nenhuma peça/material manual adicionado.</div>`;
+    return;
+  }
+
+  box.innerHTML = STATE.manualParts.map((p, idx) => `
+    <div class="pill">
+      <div>
+        <div style="font-weight:1000;">${p.part_name}</div>
+        <div class="hint">Venda: <b>${brl(calcPartSaleCents(p))}</b></div>
+        <div class="hint" style="opacity:.85;">(interno) custo: ${brl(p.cost_real_cents)} • margem: ${p.margin_percent}%</div>
+      </div>
+      <button class="btn" data-act="rmManualPart" data-i="${idx}">Remover</button>
+    </div>
+  `).join("");
+
+  box.querySelectorAll("button[data-act='rmManualPart']").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      const i = Number(e.target.getAttribute("data-i"));
+      STATE.manualParts.splice(i, 1);
+      renderManualParts();
+      renderSummaries();
+    });
+  });
+}
+
+el("#addManualPart")?.addEventListener("click", () => {
+  const name = safeText(el("#manualPartName")?.value);
+  const costCents = toCentsFromBRL(el("#manualPartCost")?.value);
+  const margin = Number(el("#manualPartMargin")?.value || 40);
+
+  if (!name) return alert("Digite o nome da peça/material.");
+  if (!costCents || costCents <= 0) return alert("Digite um custo válido (R$).");
+
+  STATE.manualParts.push({
+    id: uid("part"),
+    part_id: null,
+    part_name: name,
+    cost_real_cents: costCents,
+    margin_percent: margin,
+    needs_supplier_pickup: false,
+  });
+
+  el("#manualPartName").value = "";
+  el("#manualPartCost").value = "";
+
+  renderManualParts();
+  renderSummaries();
+});
 
 // =========================
 // INIT
