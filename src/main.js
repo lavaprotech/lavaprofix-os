@@ -169,6 +169,17 @@ function el(sel) {
   return document.querySelector(sel);
 }
 
+function uid(prefix = "m") {
+  return `${prefix}_${Math.random().toString(16).slice(2)}_${Date.now()}`;
+}
+
+function parseBRLToCents(val) {
+  const s = String(val || "").replace(/\./g, "").replace(",", ".").replace(/[^\d.]/g, "");
+  const n = Number(s);
+  if (!isFinite(n) || n <= 0) return 0;
+  return Math.round(n * 100);
+}
+
 // =========================
 // STATE
 // =========================
@@ -188,16 +199,13 @@ const STATE = {
   search: "",
   services: [],
   partsCatalog: [],
-  manualServices: [], // { id, name, labor_base_cents, warranty_days }
-  manualParts: [],    // { id, part_name, cost_real_cents, margin_percent, needs_supplier_pickup }
-
 
   selectedServiceIds: new Set(),
   selectedParts: [],
 
+  // ✅ ÚNICAS (sem duplicar)
   manualServices: [], // [{ id, name, labor_cents, warranty_days }]
-  manualParts: [],    // [{ id, part_name, cost_real_cents, margin_percent, needs_supplier_pickup }]
-
+  manualParts: [],    // [{ id, part_id:null, part_name, cost_real_cents, margin_percent, needs_supplier_pickup }]
 
   client_name: "",
   client_phone: "",
@@ -267,17 +275,18 @@ app.innerHTML = `
           </div>
         </div>
         <div class="divider"></div>
-<div class="label">Serviço manual</div>
-<div class="hint">Use quando o serviço não estiver no catálogo.</div>
 
-<div class="row">
-  <input id="manualServiceName" class="input" placeholder="Nome do serviço (ex: troca de mangueira)" />
-  <input id="manualServiceValue" class="input" placeholder="Valor mão de obra (R$)" style="max-width:220px;" />
-  <input id="manualServiceWarranty" class="input" placeholder="Garantia (dias)" style="max-width:160px;" />
-  <button id="addManualService" class="btn btnOrange">Adicionar</button>
-</div>
+        <div class="label">Serviço manual</div>
+        <div class="hint">Use quando o serviço não estiver no catálogo.</div>
 
-<div id="manualServicesList" class="list"></div>
+        <div class="row">
+          <input id="manualServiceName" class="input" placeholder="Nome do serviço (ex: troca de mangueira)" />
+          <input id="manualServiceValue" class="input" placeholder="Valor mão de obra (R$)" style="max-width:220px;" />
+          <input id="manualServiceWarranty" class="input" placeholder="Garantia (dias)" style="max-width:160px;" />
+          <button id="addManualService" class="btn btnOrange">Adicionar</button>
+        </div>
+
+        <div id="manualServicesList" class="list"></div>
 
         <div id="servicesWrap" class="servicesWrap">
           <div class="hint">Escolha um tipo (acima) para exibir serviços.</div>
@@ -300,21 +309,25 @@ app.innerHTML = `
 
           <button id="addPart" class="btn btnOrange">Adicionar</button>
         </div>
+
         <div class="divider"></div>
-<div class="label">Peça manual</div>
-<div class="hint">Use quando a peça não estiver cadastrada no Supabase.</div>
 
-<div class="row">
-  <input id="manualPartName" class="input" placeholder="Nome da peça (ex: atuador freio)" />
-  <input id="manualPartCost" class="input" placeholder="Custo (R$)" style="max-width:180px;" />
-  <select id="manualPartMargin" class="input" style="max-width:160px;">
-    <option value="30">Margem 30%</option>
-    <option value="40" selected>Margem 40%</option>
-  </select>
-  <button id="addManualPart" class="btn btnOrange">Adicionar</button>
-</div>
+        <div class="label">Peça manual</div>
+        <div class="hint">Use quando a peça não estiver cadastrada no Supabase.</div>
 
-<div id="manualPartsList" class="list"></div>
+        <div class="row">
+          <input id="manualPartName" class="input" placeholder="Nome da peça (ex: atuador freio)" />
+          <input id="manualPartCost" class="input" placeholder="Custo (R$)" style="max-width:180px;" />
+          <select id="manualPartMargin" class="input" style="max-width:160px;">
+            <option value="30">Margem 30%</option>
+            <option value="40" selected>Margem 40%</option>
+          </select>
+          <button id="addManualPart" class="btn btnOrange">Adicionar</button>
+        </div>
+
+        <div id="manualPartsList" class="list"></div>
+
+        <div class="divider"></div>
 
         <div id="partsList" class="list"></div>
 
@@ -329,7 +342,6 @@ app.innerHTML = `
         </div>
       </div>
     </section>
-
 
     <section class="card">
       <div class="row between">
@@ -542,6 +554,9 @@ async function setEquipment(eq) {
 
   STATE.selectedServiceIds = new Set();
   STATE.selectedParts = [];
+  STATE.manualServices = [];
+  STATE.manualParts = [];
+
   STATE.search = "";
   el("#search").value = "";
   COMBO_STATE = { discountPct: 0, discountedCard: null };
@@ -758,17 +773,20 @@ function renderParts() {
   const list = el("#partsList");
   if (!list) return;
 
-  if (!STATE.selectedParts.length) {
+  const allParts = [...(STATE.selectedParts || []), ...(STATE.manualParts || [])];
+
+  if (!allParts.length) {
     list.innerHTML = `<div class="hint">Nenhuma peça adicionada.</div>`;
     return;
   }
 
-  list.innerHTML = STATE.selectedParts
+  list.innerHTML = allParts
     .map((p, idx) => {
+      const isManual = !p.part_id;
       return `
         <div class="pill">
           <div>
-            <div style="font-weight:1000;">${p.part_name}</div>
+            <div style="font-weight:1000;">${p.part_name} ${isManual ? '<span class="hint">(manual)</span>' : ""}</div>
             <div class="hint">Venda: <b>${brl(calcPartSaleCents(p))}</b> ${
               p.needs_supplier_pickup ? " • Fornecedor" : ""
             }</div>
@@ -789,15 +807,30 @@ function renderParts() {
     b.addEventListener("click", (e) => {
       const act = e.target.getAttribute("data-act");
       const i = Number(e.target.getAttribute("data-i"));
+      const all = [...(STATE.selectedParts || []), ...(STATE.manualParts || [])];
+      const target = all[i];
+      const isManual = !target.part_id;
 
       if (act === "removePart") {
-        STATE.selectedParts.splice(i, 1);
+        if (isManual) {
+          const mi = STATE.manualParts.findIndex((x) => x.id === target.id);
+          if (mi >= 0) STATE.manualParts.splice(mi, 1);
+        } else {
+          const ci = STATE.selectedParts.findIndex((x) => x.part_id === target.part_id && x.part_name === target.part_name);
+          if (ci >= 0) STATE.selectedParts.splice(ci, 1);
+        }
         renderParts();
         renderSummaries();
       }
 
       if (act === "toggleSupplier") {
-        STATE.selectedParts[i].needs_supplier_pickup = !STATE.selectedParts[i].needs_supplier_pickup;
+        if (isManual) {
+          const mi = STATE.manualParts.findIndex((x) => x.id === target.id);
+          if (mi >= 0) STATE.manualParts[mi].needs_supplier_pickup = !STATE.manualParts[mi].needs_supplier_pickup;
+        } else {
+          const ci = STATE.selectedParts.findIndex((x) => x.part_id === target.part_id && x.part_name === target.part_name);
+          if (ci >= 0) STATE.selectedParts[ci].needs_supplier_pickup = !STATE.selectedParts[ci].needs_supplier_pickup;
+        }
         renderParts();
         renderSummaries();
       }
@@ -825,18 +858,6 @@ el("#autoSupplierLog").addEventListener("click", () => {
 // =========================
 // MANUAL SERVICES / PARTS
 // =========================
-function parseBRLToCents(val) {
-  const s = String(val || "").replace(/\./g, "").replace(",", ".").replace(/[^\d.]/g, "");
-  const n = Number(s);
-  if (!isFinite(n) || n <= 0) return 0;
-  return Math.round(n * 100);
-}
-
-function uid(prefix) {
-  return `${prefix}_${Math.random().toString(16).slice(2)}_${Date.now()}`;
-}
-
-// ---- Manual Service
 function renderManualServices() {
   const box = el("#manualServicesList");
   if (!box) return;
@@ -891,7 +912,6 @@ el("#addManualService")?.addEventListener("click", () => {
   renderSummaries();
 });
 
-// ---- Manual Part
 function renderManualParts() {
   const box = el("#manualPartsList");
   if (!box) return;
@@ -927,12 +947,14 @@ function renderManualParts() {
       if (act === "rmManualPart") {
         STATE.manualParts.splice(i, 1);
         renderManualParts();
+        renderParts();
         renderSummaries();
       }
 
       if (act === "toggleManualSupplier") {
         STATE.manualParts[i].needs_supplier_pickup = !STATE.manualParts[i].needs_supplier_pickup;
         renderManualParts();
+        renderParts();
         renderSummaries();
       }
     });
@@ -960,6 +982,7 @@ el("#addManualPart")?.addEventListener("click", () => {
   el("#manualPartCost").value = "";
 
   renderManualParts();
+  renderParts();
   renderSummaries();
 });
 
@@ -994,7 +1017,7 @@ function calcLogisticsCents() {
     return Number(STATE.supplier_logistics_override_cents || 0);
 
   const needs = [...(STATE.selectedParts || []), ...(STATE.manualParts || [])]
-  .some((p) => p.needs_supplier_pickup === true);
+    .some((p) => p.needs_supplier_pickup === true);
 
   if (!needs) return 0;
 
@@ -1011,19 +1034,16 @@ function computeTotals() {
   const nonDiagServices = selectedServices.filter((s) => !isDiagnosticService(s));
   const allNonDiag = [...nonDiagServices, ...manualServices];
 
-
-  const onlyDiagSelected = diagSelected && nonDiagServices.length === 0;
+  const onlyDiagSelected = diagSelected && nonDiagServices.length === 0 && manualServices.length === 0;
 
   const labor = onlyDiagSelected
     ? diagValue
     : allNonDiag.reduce((sum, s) => sum + Number(s.labor_base_cents || s.labor_cents || 0), 0);
 
-
   const allParts = [...(STATE.selectedParts || []), ...(STATE.manualParts || [])];
 
   const partsSale = allParts.reduce((sum, p) => sum + calcPartSaleCents(p), 0);
   const partsCost = allParts.reduce((sum, p) => sum + Number(p.cost_real_cents || 0), 0);
-
 
   const logistics = calcLogisticsCents();
 
@@ -1031,7 +1051,6 @@ function computeTotals() {
     STATE.equipment === EQUIPMENT_TYPE.TOP_LOAD || STATE.equipment === EQUIPMENT_TYPE.LAVA_E_SECA;
 
   const diagnosisIncludedFree = isMachineType && allNonDiag.length >= 1;
-
 
   const card = Math.max(0, labor + partsSale + logistics);
 
@@ -1045,14 +1064,14 @@ function computeTotals() {
   const lucroReal = netCard - partsCost - logistics - fixedCost;
 
   const warrantyDays = Math.max(
-  ...selectedServices.map((s) => Number(s.warranty_days || 0)),
-  ...manualServices.map((s) => Number(s.warranty_days || 0)),
-  0
-);
-
+    ...selectedServices.map((s) => Number(s.warranty_days || 0)),
+    ...manualServices.map((s) => Number(s.warranty_days || 0)),
+    0
+  );
 
   return {
     selectedServices,
+    manualServices, // ✅ agora existe
     nonDiagServices,
     diagSelected,
     onlyDiagSelected,
@@ -1120,28 +1139,21 @@ el("#applyCombo").addEventListener("click", () => {
 function buildClientMessage(t, useCombo = false) {
   const clientName = safeText(STATE.client_name) || "Cliente";
   const eqLabel = equipmentLabel(STATE.equipment);
-  
-  // ---- Serviços (catálogo + manual)
 
   const servicesAll = [
-  ...(t.selectedServices || []).map((s) => s.name),
-  ...(t.manualServices || []).map((s) => s.name),
-];
+    ...(t.selectedServices || []).map((s) => s.name),
+    ...(t.manualServices || []).map((s) => s.name),
+  ];
 
   const servicesTxt = servicesAll.length
     ? servicesAll.map((n) => `• ${n}`).join("\n")
     : "• (nenhum)";
 
-
-  const partsAll = [
-  ...(STATE.selectedParts || []),
-  ...(STATE.manualParts || []),
-];
+  const partsAll = [...(STATE.selectedParts || []), ...(STATE.manualParts || [])];
 
   const partsTxt = partsAll.length
     ? `\n\nPeças previstas:\n${partsAll.map((p) => `• ${p.part_name}`).join("\n")}`
     : "";
-
 
   const diagTxt = t.diagnosisIncludedFree ? `\n✅ Diagnóstico técnico incluso (orçamento aprovado).` : "";
 
@@ -1212,7 +1224,8 @@ function renderSummaries(useCombo = false) {
         ${lucroWarn}
         <div class="divider"></div>
         <div><b>Tipo:</b> ${equipmentLabel(STATE.equipment)}</div>
-        <div><b>Serviços selecionados:</b> ${t.selectedServices.length}</div>
+        <div><b>Serviços catálogo:</b> ${t.selectedServices.length}</div>
+        <div><b>Serviços manuais:</b> ${(t.manualServices || []).length}</div>
         <div><b>Mão de obra:</b> ${brl(t.labor)}</div>
         <div><b>Peças (venda):</b> ${brl(t.partsSale)}</div>
         <div><b>Logística:</b> ${brl(t.logistics)}</div>
@@ -1262,6 +1275,9 @@ function saveDraft() {
     equipment: STATE.equipment,
     selectedServiceIds: Array.from(STATE.selectedServiceIds),
     selectedParts: STATE.selectedParts,
+    manualServices: STATE.manualServices,
+    manualParts: STATE.manualParts,
+
     client_name: STATE.client_name,
     client_phone: STATE.client_phone,
     client_address: STATE.client_address,
@@ -1283,6 +1299,9 @@ async function loadDraft() {
   STATE.equipment = payload.equipment || null;
   STATE.selectedServiceIds = new Set(payload.selectedServiceIds || []);
   STATE.selectedParts = payload.selectedParts || [];
+
+  STATE.manualServices = payload.manualServices || [];
+  STATE.manualParts = payload.manualParts || [];
 
   STATE.client_name = payload.client_name || "";
   STATE.client_phone = payload.client_phone || "";
@@ -1345,13 +1364,13 @@ el("#newOS").addEventListener("click", () => {
 
   renderServiceList();
   renderParts();
-  renderSummaries();
   renderManualServices();
   renderManualParts();
+  renderSummaries();
 });
 
 // =========================
-// SAVE OS TO SUPABASE
+// SAVE OS TO SUPABASE (catálogo)
 // =========================
 el("#saveOSDb").addEventListener("click", async () => {
   await refreshSession();
@@ -1365,8 +1384,10 @@ el("#saveOSDb").addEventListener("click", async () => {
   }
 
   const t = computeTotals();
-  if (!t.selectedServices.length) {
-    alert("Selecione ao menos 1 serviço.");
+  const hasAnyService = (t.selectedServices?.length || 0) + (t.manualServices?.length || 0) > 0;
+
+  if (!hasAnyService) {
+    alert("Selecione ao menos 1 serviço (catálogo ou manual).");
     return;
   }
 
@@ -1397,18 +1418,22 @@ el("#saveOSDb").addEventListener("click", async () => {
 
   const workOrderId = wo.id;
 
-  const itemsServices = t.selectedServices.map((s) => ({
+  // serviços do catálogo
+  const itemsServices = (t.selectedServices || []).map((s) => ({
     work_order_id: workOrderId,
     service_id: s.id,
   }));
 
-  const { error: wosErr } = await supabase.from("work_order_services").insert(itemsServices);
-  if (wosErr) {
-    console.error("work_order_services insert:", wosErr);
-    alert("Erro ao salvar serviços da OS. Veja o console.");
-    return;
+  if (itemsServices.length) {
+    const { error: wosErr } = await supabase.from("work_order_services").insert(itemsServices);
+    if (wosErr) {
+      console.error("work_order_services insert:", wosErr);
+      alert("Erro ao salvar serviços da OS. Veja o console.");
+      return;
+    }
   }
 
+  // peças (catálogo)
   if (STATE.selectedParts.length) {
     const itemsParts = STATE.selectedParts.map((p) => ({
       work_order_id: workOrderId,
@@ -1428,6 +1453,9 @@ el("#saveOSDb").addEventListener("click", async () => {
     }
   }
 
+  // ⚠️ serviços/peças manuais não salvam nas tabelas atuais porque você não tem tabelas pra isso.
+  // Se você quiser, eu monto: work_order_manual_services e work_order_manual_parts (com RLS + inserts).
+
   saveDraft();
   alert(`OS salva com sucesso! ID: ${workOrderId}\n(Rascunho salvo também.)`);
 });
@@ -1436,33 +1464,29 @@ el("#saveOSDb").addEventListener("click", async () => {
 // PDF CERTIFICATE (A4 + branding + selo + assinatura)
 // =========================
 async function generateWarrantyPDF() {
-  console.log("[UI] Clique em #genPDF");
-  console.log("[PDF] Iniciando geração...");
-
   const t = computeTotals();
 
   if (!safeText(STATE.client_name)) {
     alert("Preencha o nome do cliente para gerar o certificado.");
     return;
   }
-  if (!t.selectedServices.length) {
-    alert("Selecione ao menos 1 serviço.");
+  const hasAnyService = (t.selectedServices?.length || 0) + (t.manualServices?.length || 0) > 0;
+  if (!hasAnyService) {
+    alert("Selecione ao menos 1 serviço (catálogo ou manual).");
     return;
   }
 
   const warrantyDays = t.warrantyDays || 0;
 
-  // ✅ A4 em mm (layout consistente para impressão)
   const doc = new jsPDF({ unit: "mm", format: "a4", compress: true });
 
-  const pageW = doc.internal.pageSize.getWidth();  // 210
-  const pageH = doc.internal.pageSize.getHeight(); // 297
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
 
   const marginX = 14;
   const headerH = 20;
   const footerH = 22;
 
-  // Pré-carrega assets (cache)
   const [logoData, sealData, signatureData] = await Promise.all([
     getLogoDataUrlSafe(),
     getSealDataUrlSafe(),
@@ -1481,27 +1505,19 @@ async function generateWarrantyPDF() {
     doc.setFillColor(BRAND.orange);
     doc.rect(0, 0, pageW, headerH, "F");
 
-    // logo esquerda (sem distorção)
     if (logoData) {
-      const boxX = marginX;
-      const boxY = 4;
-      const boxW = 36;
-      const boxH = 12;
-      addImageContain(doc, logoData, boxX, boxY, boxW, boxH, "PNG");
+      addImageContain(doc, logoData, marginX, 4, 36, 12, "PNG");
     }
 
-    // selo canto superior direito (equilibrado + destaque leve)
     if (sealData) {
       const sealBoxW = 22;
       const sealBoxH = 22;
       const sealX = pageW - marginX - sealBoxW;
       const sealY = 2.5;
-
       drawSoftBadge(sealX - 1.2, sealY - 1.2, sealBoxW + 2.4, sealBoxH + 2.4);
       addImageContain(doc, sealData, sealX, sealY, sealBoxW, sealBoxH, "PNG");
     }
 
-    // título (evita conflitar com selo)
     doc.setTextColor(255, 255, 255);
     doc.setFont("helvetica", "bold");
     doc.setFontSize(14);
@@ -1509,12 +1525,10 @@ async function generateWarrantyPDF() {
     const titleRight = sealData ? pageW - marginX - 26 : pageW - marginX;
     doc.text("CERTIFICADO DE GARANTIA", titleRight, 12, { align: "right" });
 
-    // linha separadora
     doc.setDrawColor(230, 230, 230);
     doc.setLineWidth(0.2);
     doc.line(marginX, headerH + 4, pageW - marginX, headerH + 4);
 
-    // reset
     doc.setTextColor(0, 0, 0);
     doc.setFont("helvetica", "normal");
     doc.setFontSize(11);
@@ -1569,7 +1583,6 @@ async function generateWarrantyPDF() {
   await drawHeader();
   drawFooter();
 
-  // Reserva para assinatura (pra não colidir com rodapé)
   const signatureReserveH = signatureData ? 26 : 0;
   const bottomSafe = footerH + 8;
   const pageBottomLimit = () => pageH - bottomSafe - signatureReserveH;
@@ -1582,7 +1595,6 @@ async function generateWarrantyPDF() {
     y += 7;
   }
 
-  // ===== DADOS DO CLIENTE =====
   doc.setFont("helvetica", "bold");
   await addLine("Dados do Cliente");
   doc.setFont("helvetica", "normal");
@@ -1598,7 +1610,6 @@ async function generateWarrantyPDF() {
 
   y += 3;
 
-  // ===== SERVIÇOS =====
   doc.setFont("helvetica", "bold");
   await addLine("Serviços realizados");
   doc.setFont("helvetica", "normal");
@@ -1609,23 +1620,27 @@ async function generateWarrantyPDF() {
     doc.text(`• ${s.name}`, marginX + 2, y);
     y += 6.5;
   }
+  for (const s of t.manualServices) {
+    if (y > pageBottomLimit()) y = await newPageWithBrand();
+    doc.text(`• ${s.name} (manual)`, marginX + 2, y);
+    y += 6.5;
+  }
 
-  // ===== PEÇAS =====
-  if (STATE.selectedParts.length) {
+  const allParts = [...(STATE.selectedParts || []), ...(STATE.manualParts || [])];
+  if (allParts.length) {
     y += 3;
     doc.setFont("helvetica", "bold");
     await addLine("Peças fornecidas/instaladas");
     doc.setFont("helvetica", "normal");
     y += 1;
 
-    for (const p of STATE.selectedParts) {
+    for (const p of allParts) {
       if (y > pageBottomLimit()) y = await newPageWithBrand();
-      doc.text(`• ${p.part_name}`, marginX + 2, y);
+      doc.text(`• ${p.part_name}${p.part_id ? "" : " (manual)"}`, marginX + 2, y);
       y += 6.5;
     }
   }
 
-  // ===== GARANTIA =====
   y += 3;
   doc.setFont("helvetica", "bold");
   await addLine(`Garantia: ${warrantyDays} dias`);
@@ -1641,7 +1656,6 @@ async function generateWarrantyPDF() {
     await addLine(line);
   }
 
-  // ✅ Assinatura digital (remove “Assinatura do Técnico/Cliente”)
   if (signatureData) {
     if (y > pageBottomLimit()) y = await newPageWithBrand();
 
@@ -1660,7 +1674,6 @@ async function generateWarrantyPDF() {
   }
 
   const fileName = `garantia-${nowISODate()}-${onlyDigits(STATE.client_phone || "cliente") || "cliente"}.pdf`;
-
   doc.save(fileName);
 
   try {
@@ -1670,8 +1683,6 @@ async function generateWarrantyPDF() {
   } catch (e) {
     console.warn("Popup bloqueado. PDF baixado normalmente.", e);
   }
-
-  console.log("[PDF] Gerado com sucesso:", fileName);
 }
 
 // =========================
@@ -1679,10 +1690,7 @@ async function generateWarrantyPDF() {
 // =========================
 function attachPdfButton() {
   const pdfBtn = el("#genPDF");
-  if (!pdfBtn) {
-    console.warn("Botão #genPDF não encontrado no DOM.");
-    return;
-  }
+  if (!pdfBtn) return;
 
   pdfBtn.onclick = async () => {
     try {
@@ -1716,132 +1724,21 @@ async function reloadAll() {
 }
 
 // =========================
-// ORÇAMENTO MANUAL (SERVIÇO + PEÇA)
-// =========================
-function toCentsFromBRL(input) {
-  const n = Number(String(input || "").replace(",", ".").replace(/[^0-9.]/g, ""));
-  if (!Number.isFinite(n)) return 0;
-  return Math.round(n * 100);
-}
-
-function uid(prefix = "m") {
-  return `${prefix}_${Math.random().toString(16).slice(2)}_${Date.now()}`;
-}
-
-// ---- Serviço manual
-function renderManualServices() {
-  const box = el("#manualServicesList");
-  if (!box) return;
-
-  if (!STATE.manualServices.length) {
-    box.innerHTML = `<div class="hint">Nenhum serviço manual adicionado.</div>`;
-    return;
-  }
-
-  box.innerHTML = STATE.manualServices.map((s, idx) => `
-    <div class="pill">
-      <div>
-        <div style="font-weight:1000;">${s.name}</div>
-        <div class="hint">Valor: <b>${brl(s.labor_base_cents)}</b> • ${s.warranty_days > 0 ? `Garantia ${s.warranty_days} dias` : "Sem garantia"}</div>
-      </div>
-      <button class="btn" data-act="rmManualSvc" data-i="${idx}">Remover</button>
-    </div>
-  `).join("");
-
-  box.querySelectorAll("button[data-act='rmManualSvc']").forEach(btn => {
-    btn.addEventListener("click", (e) => {
-      const i = Number(e.target.getAttribute("data-i"));
-      STATE.manualServices.splice(i, 1);
-      renderManualServices();
-      renderSummaries();
-    });
-  });
-}
-
-el("#addManualService")?.addEventListener("click", () => {
-  const name = safeText(el("#manualSvcName")?.value);
-  const valueCents = toCentsFromBRL(el("#manualSvcValue")?.value);
-  const warrantyDays = Number(el("#manualSvcWarranty")?.value || 90);
-
-  if (!name) return alert("Digite o nome do serviço manual.");
-  if (!valueCents || valueCents <= 0) return alert("Digite um valor válido para o serviço manual.");
-
-  STATE.manualServices.push({
-    id: uid("svc"),
-    name,
-    labor_base_cents: valueCents,
-    warranty_days: warrantyDays,
-  });
-
-  el("#manualSvcName").value = "";
-  el("#manualSvcValue").value = "";
-
-  renderManualServices();
-  renderSummaries();
-});
-
-// ---- Peça/material manual
-function renderManualParts() {
-  const box = el("#manualPartsList");
-  if (!box) return;
-
-  if (!STATE.manualParts.length) {
-    box.innerHTML = `<div class="hint">Nenhuma peça/material manual adicionado.</div>`;
-    return;
-  }
-
-  box.innerHTML = STATE.manualParts.map((p, idx) => `
-    <div class="pill">
-      <div>
-        <div style="font-weight:1000;">${p.part_name}</div>
-        <div class="hint">Venda: <b>${brl(calcPartSaleCents(p))}</b></div>
-        <div class="hint" style="opacity:.85;">(interno) custo: ${brl(p.cost_real_cents)} • margem: ${p.margin_percent}%</div>
-      </div>
-      <button class="btn" data-act="rmManualPart" data-i="${idx}">Remover</button>
-    </div>
-  `).join("");
-
-  box.querySelectorAll("button[data-act='rmManualPart']").forEach(btn => {
-    btn.addEventListener("click", (e) => {
-      const i = Number(e.target.getAttribute("data-i"));
-      STATE.manualParts.splice(i, 1);
-      renderManualParts();
-      renderSummaries();
-    });
-  });
-}
-
-el("#addManualPart")?.addEventListener("click", () => {
-  const name = safeText(el("#manualPartName")?.value);
-  const costCents = toCentsFromBRL(el("#manualPartCost")?.value);
-  const margin = Number(el("#manualPartMargin")?.value || 40);
-
-  if (!name) return alert("Digite o nome da peça/material.");
-  if (!costCents || costCents <= 0) return alert("Digite um custo válido (R$).");
-
-  STATE.manualParts.push({
-    id: uid("part"),
-    part_id: null,
-    part_name: name,
-    cost_real_cents: costCents,
-    margin_percent: margin,
-    needs_supplier_pickup: false,
-  });
-
-  el("#manualPartName").value = "";
-  el("#manualPartCost").value = "";
-
-  renderManualParts();
-  renderSummaries();
-});
-
-// =========================
 // INIT
 // =========================
 (async function init() {
+  // ✅ SW primeiro (não perde por causa do return do loadDraft)
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker
+        .register("/service-worker.js")
+        .then(() => console.log("Service Worker registrado"))
+        .catch((err) => console.error("Erro no SW:", err));
+    });
+  }
+
   await loadConfig();
   await refreshSession();
-
   attachPdfButton();
 
   const raw = localStorage.getItem("lpfx_last_os");
@@ -1853,14 +1750,6 @@ el("#addManualPart")?.addEventListener("click", () => {
       console.warn("Falha ao carregar rascunho:", e);
     }
   }
-  if ("serviceWorker" in navigator) {
-  window.addEventListener("load", () => {
-    navigator.serviceWorker.register("/service-worker.js")
-      .then(() => console.log("Service Worker registrado"))
-      .catch(err => console.error("Erro no SW:", err));
-  });
-}
-
 
   renderSummaries();
 })();
